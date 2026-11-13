@@ -4,7 +4,9 @@
     "HOW_TO_GET_TOKEN": "How to get an API key",
     "WORKSPACE_URL": "Workspace URL",
     "WORKSPACE_URL_HELP": "Open your workspace in Plane and copy the address from your browser, e.g. https://app.plane.so/<workspace>/ or https://plane.example.com/<workspace>/",
-    "PROJECT": "Project"
+    "PROJECT": "Project",
+    "EXTRA_FIELDS": "Extra fields",
+    "EXTRA_FIELDS_HELP": "Pick a project, then click Load Options again. The fields you pick show in the task panel."
   },
   "DISPLAY": {
     "SUMMARY": "Summary",
@@ -12,6 +14,7 @@
     "PRIORITY": "Priority",
     "ASSIGNEE": "Assignee",
     "DUE": "Due date",
+    "MORE_FIELDS": "More fields",
     "DESCRIPTION": "Description"
   }
 }

@@ -27,6 +27,9 @@ import {
   toProjectOptions,
   projectRoot,
   stateGroupOf,
+  formatExtraFields,
+  RELEASES_OPTION,
+  toExtraFieldOptions,
   type PlaneWorkItem,
 } from './plane-helpers';
 
@@ -1250,5 +1253,186 @@ describe('done-state field mapping', () => {
       title: 'ENG-1 n',
       body: 'b',
     });
+  });
+});
+
+describe('extra fields', () => {
+  type LoadOptions = (
+    config: Record<string, unknown>,
+    http: PluginHttp,
+  ) => Promise<{ label: string; value: string }[]>;
+
+  const CFG = {
+    apiKey: 'k',
+    workspaceUrl: 'https://plane.example.com/acme/',
+    projectId: 'proj-1',
+  };
+  const ROOT = 'https://plane.example.com/api/v1/workspaces/acme';
+
+  const loadExtraFields = (): LoadOptions => {
+    const field = definition.configFields.find((f) => f.key === 'extraFields');
+    expect(field?.type).toBe('multiSelect');
+    return field!.loadOptions as LoadOptions;
+  };
+
+  // Shapes copied from a live self-hosted instance with a releases extension.
+  const SAMPLE_ITEM = {
+    id: 'wi-1',
+    name: 'Ship it',
+    sequence_id: 7,
+    description_html: '<p>x</p>',
+    priority: 'high',
+    state: 's1',
+    assignees: [],
+    labels: [],
+    estimate_point: null,
+    created_by: 'u1',
+    start_date: null,
+    is_draft: false,
+  };
+
+  it('offers the fields of a real work item plus releases, without ones already shown', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url === `${ROOT}/releases/`) {
+        return { results: [{ name: 'Beta', work_items: [] }] };
+      }
+      return { results: [SAMPLE_ITEM] };
+    });
+
+    const options = await loadExtraFields()(CFG, { get } as unknown as PluginHttp);
+
+    expect(options.map((o) => o.value)).toEqual([
+      'created_by',
+      'estimate_point',
+      'is_draft',
+      'labels',
+      RELEASES_OPTION,
+      'start_date',
+    ]);
+    expect(options.find((o) => o.value === 'estimate_point')?.label).toBe(
+      'Estimate point',
+    );
+    expect(get).toHaveBeenCalledWith(
+      `${ROOT}/projects/proj-1/work-items/`,
+      expect.anything(),
+    );
+  });
+
+  it('leaves releases out on stock Plane, where the list does not exist', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url.endsWith('/releases/')) {
+        throw new Error('404');
+      }
+      return { results: [SAMPLE_ITEM] };
+    });
+
+    const options = await loadExtraFields()(CFG, { get } as unknown as PluginHttp);
+
+    expect(options.map((o) => o.value)).not.toContain(RELEASES_OPTION);
+    expect(options.length).toBeGreaterThan(0);
+  });
+
+  // The dialog loads every list on one click, so this runs before a project is picked.
+  it('returns no options, not an error, before a project is picked', async () => {
+    const get = vi.fn();
+
+    await expect(
+      loadExtraFields()({ ...CFG, projectId: '' }, { get } as unknown as PluginHttp),
+    ).resolves.toEqual([]);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('shows picked fields with names, and the releases that list the item', async () => {
+    const get = vi.fn(async (url: string, _o?: { params?: Record<string, string> }) => {
+      if (url === `${ROOT}/releases/`) {
+        return {
+          results: [
+            { name: 'Beta B1', work_items: ['other'] },
+            { name: 'Beta B2', work_items: ['wi-1', 'other'] },
+          ],
+        };
+      }
+      return {
+        ...SAMPLE_ITEM,
+        project: { identifier: 'ENG' },
+        estimate_point: { key: 1, value: '5' },
+        created_by: { display_name: 'Ada', email: 'ada@example.com' },
+        labels: [{ name: 'bug' }, { name: 'ui' }],
+      };
+    });
+
+    const issue = await definition.getById(
+      'wi-1',
+      {
+        ...CFG,
+        extraFields: [
+          RELEASES_OPTION,
+          'estimate_point',
+          'created_by',
+          'labels',
+          'is_draft',
+        ],
+      },
+      { get } as unknown as PluginHttp,
+    );
+
+    expect(issue['moreFields']).toBe(
+      [
+        '**Releases:** Beta B2',
+        '**Estimate point:** 5',
+        '**Created by:** Ada',
+        '**Labels:** bug, ui',
+        '**Is draft:** No',
+      ].join('  \n'),
+    );
+    const itemCall = get.mock.calls.find(([u]) => u.includes('/work-items/'));
+    expect(itemCall?.[1]?.params?.['expand']).toBe(
+      'state,assignees,project,estimate_point,created_by,labels,is_draft',
+    );
+  });
+
+  it('still refreshes the task when the releases list fails', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url.endsWith('/releases/')) {
+        throw new Error('404');
+      }
+      return { ...SAMPLE_ITEM, project: { identifier: 'ENG' } };
+    });
+
+    const issue = await definition.getById(
+      'wi-1',
+      { ...CFG, extraFields: [RELEASES_OPTION] },
+      { get } as unknown as PluginHttp,
+    );
+
+    expect(issue.title).toBe('ENG-7 Ship it');
+    expect(issue['moreFields']).toBe('');
+  });
+
+  it('makes no extra request when no field is picked', async () => {
+    const get = vi.fn(async () => ({ ...SAMPLE_ITEM, project: { identifier: 'ENG' } }));
+
+    const issue = await definition.getById('wi-1', CFG, { get } as unknown as PluginHttp);
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(issue['moreFields']).toBe('');
+  });
+
+  it('escapes markdown in values and shows timestamps as a day', () => {
+    expect(
+      formatExtraFields(
+        { title_note: '*not bold* [link](x)', completed_at: '2026-11-12T10:35:36.123Z' },
+        ['title_note', 'completed_at'],
+        [],
+      ),
+    ).toBe(
+      '**Title note:** \\*not bold\\* \\[link\\](x)  \n**Completed at:** 2026-11-12',
+    );
+  });
+
+  it('offers nothing from an empty project but still offers releases', () => {
+    expect(toExtraFieldOptions(undefined, true)).toEqual([
+      { label: 'Releases', value: RELEASES_OPTION },
+    ]);
   });
 });

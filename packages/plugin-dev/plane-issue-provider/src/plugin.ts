@@ -7,6 +7,8 @@ import type {
 } from '@super-productivity/plugin-api';
 import {
   apiRoot,
+  extraFieldExpands,
+  formatExtraFields,
   isDoneStateGroup,
   isOpenWorkItem,
   LIST_EXPAND,
@@ -20,10 +22,15 @@ import {
   parseWorkspaceUrl,
   PlaneConfig,
   PlaneProject,
+  PlaneRelease,
   PlaneSearchHit,
   PlaneUserConfig,
   PlaneWorkItem,
   projectRoot,
+  RELEASES_OPTION,
+  releaseNamesFor,
+  selectedExtraFields,
+  toExtraFieldOptions,
   toProjectOptions,
   workspaceRoot,
 } from './plane-helpers';
@@ -94,6 +101,64 @@ const loadProjectOptions = async (
     cursor = res.next_cursor;
   }
   return toProjectOptions(projects);
+};
+
+/**
+ * Fields the user can add to the task panel: the keys of one real work item, so a
+ * customised server's own fields show up too, plus releases where the server has them.
+ * Empty until a project is picked, because the dialog loads every list on one click.
+ */
+const loadExtraFieldOptions = async (
+  config: Record<string, unknown>,
+  http: PluginHttp,
+): Promise<{ label: string; value: string }[]> => {
+  const raw = config as PlaneUserConfig;
+  if (!(raw.projectId || '').trim()) {
+    return [];
+  }
+  const cfg = asConfig(config);
+  const [sample, hasReleases] = await Promise.all([
+    http.get<PlanePage<Record<string, unknown>>>(`${projectRoot(cfg)}/work-items/`, {
+      params: { per_page: '1' },
+    }),
+    http
+      .get<PlanePage<PlaneRelease>>(`${workspaceRoot(cfg)}/releases/`, {
+        params: { per_page: '1' },
+      })
+      .then((res) => Array.isArray(res?.results))
+      // Stock Plane has no releases and answers 404.
+      .catch(() => false),
+  ]);
+  return toExtraFieldOptions(sample?.results?.[0], hasReleases);
+};
+
+const fetchReleases = async (
+  cfg: PlaneConfig,
+  http: PluginHttp,
+): Promise<PlaneRelease[]> => {
+  const releases: PlaneRelease[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < LIST_MAX_PAGES; page++) {
+    const params: Record<string, string> = {
+      per_page: String(LIST_PAGE_SIZE),
+      order_by: 'created_at',
+    };
+    if (cursor) {
+      params['cursor'] = cursor;
+    }
+    const res = await http.get<PlanePage<PlaneRelease>>(
+      `${workspaceRoot(cfg)}/releases/`,
+      {
+        params,
+      },
+    );
+    releases.push(...(res?.results || []));
+    if (!res?.next_page_results || !res.next_cursor) {
+      break;
+    }
+    cursor = res.next_cursor;
+  }
+  return releases;
 };
 
 const fetchProjectIdentifier = async (
@@ -184,6 +249,18 @@ PluginAPI.registerIssueProvider({
       required: true,
       loadOptions: loadProjectOptions,
     },
+    {
+      key: 'extraFields',
+      type: 'multiSelect',
+      label: t('CFG.EXTRA_FIELDS', 'Extra fields'),
+      description: t(
+        'CFG.EXTRA_FIELDS_HELP',
+        'Pick a project, then click Load Options again. The fields you pick show in ' +
+          'the task panel.',
+      ),
+      advanced: true,
+      loadOptions: loadExtraFieldOptions,
+    },
   ],
 
   // Reads only the key, so a not-yet-valid workspace URL cannot break request headers.
@@ -225,11 +302,30 @@ PluginAPI.registerIssueProvider({
     http: PluginHttp,
   ): Promise<PluginIssue> {
     const cfg = asConfig(config);
-    const item = await http.get<PlaneWorkItem>(
-      `${projectRoot(cfg)}/work-items/${encodeURIComponent(issueId)}/`,
-      { params: { expand: 'state,assignees,project' } },
+    const extraFields = selectedExtraFields(config['extraFields']);
+    const expand = [
+      ...new Set(['state', 'assignees', 'project', ...extraFieldExpands(extraFields)]),
+    ].join(',');
+    const [item, releases] = await Promise.all([
+      http.get<PlaneWorkItem>(
+        `${projectRoot(cfg)}/work-items/${encodeURIComponent(issueId)}/`,
+        { params: { expand } },
+      ),
+      extraFields.includes(RELEASES_OPTION)
+        ? // A missing releases list must not stop the task from refreshing.
+          fetchReleases(cfg, http).catch((): PlaneRelease[] => [])
+        : Promise.resolve([]),
+    ]);
+    return mapWorkItem(
+      item,
+      cfg,
+      '',
+      formatExtraFields(
+        item as unknown as Record<string, unknown>,
+        extraFields,
+        releaseNamesFor(releases, item.id),
+      ),
     );
-    return mapWorkItem(item, cfg);
   },
 
   // Browse URLs need project identifier + sequence; fall back to getById().url.
@@ -280,6 +376,12 @@ PluginAPI.registerIssueProvider({
       hideEmpty: true,
     },
     { field: 'due', label: t('DISPLAY.DUE', 'Due date'), type: 'date', hideEmpty: true },
+    {
+      field: 'moreFields',
+      label: t('DISPLAY.MORE_FIELDS', 'More fields'),
+      type: 'markdown',
+      hideEmpty: true,
+    },
     {
       // `description_stripped` is plain text, not markdown.
       field: 'body',

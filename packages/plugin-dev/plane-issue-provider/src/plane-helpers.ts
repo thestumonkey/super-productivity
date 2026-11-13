@@ -395,6 +395,8 @@ export const mapWorkItem = (
   item: PlaneWorkItem,
   cfg: PlaneConfig,
   projectIdentifierFallback = '',
+  /** Picked extra fields as markdown, from formatExtraFields(). */
+  moreFields = '',
 ): PluginIssue => {
   const state = stateOf(item);
   const ident = projectIdentifierOf(item, projectIdentifierFallback);
@@ -425,6 +427,7 @@ export const mapWorkItem = (
     // `dueWithTime` would claim a precision `target_date` does not have.
     ...(dueMs !== null ? { start: dueMs } : {}),
     assignees,
+    moreFields,
   };
 };
 
@@ -475,3 +478,124 @@ export const apiRoot = (cfg: PlaneConfig): string => {
  */
 export const projectRoot = (cfg: PlaneConfig): string =>
   `${apiRoot(cfg)}/projects/${encodeURIComponent((cfg.projectId || '').trim())}`;
+
+/**
+ * Option value for the releases a work item belongs to. Releases are a workspace list
+ * that names its work items (stock Plane has no such list, so the option only appears
+ * where `/releases/` answers). The `@` keeps it apart from a work-item field name.
+ */
+export const RELEASES_OPTION = '@releases';
+
+export interface PlaneRelease {
+  name?: string;
+  work_items?: string[];
+}
+
+/** Fields the panel already shows, or that are internal plumbing with no meaning to a reader. */
+const EXTRA_FIELD_SKIP = new Set([
+  'id',
+  'name',
+  'sequence_id',
+  'description_html',
+  'description_stripped',
+  'description_binary',
+  'state',
+  'state_group',
+  'priority',
+  'assignees',
+  'target_date',
+  'project',
+  'workspace',
+  'deleted_at',
+]);
+
+/** `estimate_point` → `Estimate point`. */
+export const fieldLabel = (key: string): string => {
+  if (key === RELEASES_OPTION) {
+    return 'Releases';
+  }
+  const words = key.replace(/_/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
+
+/** Fields of a sample work item the user can pick, plus releases when the server has them. */
+export const toExtraFieldOptions = (
+  sample: Record<string, unknown> | undefined,
+  hasReleases: boolean,
+): { label: string; value: string }[] => {
+  const keys = Object.keys(sample || {}).filter((k) => !EXTRA_FIELD_SKIP.has(k));
+  if (hasReleases) {
+    keys.push(RELEASES_OPTION);
+  }
+  return keys
+    .map((value) => ({ label: fieldLabel(value), value }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+};
+
+/** The picked extra fields from config; a multi-select is unset until first saved. */
+export const selectedExtraFields = (raw: unknown): string[] =>
+  Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
+
+/** Work-item fields Plane should expand, so a reference shows a name, not a UUID. Plane
+ * ignores names it cannot expand. */
+export const extraFieldExpands = (fields: string[]): string[] =>
+  fields.filter((f) => f !== RELEASES_OPTION);
+
+const ISO_DATE_TIME = /^(\d{4}-\d{2}-\d{2})T/;
+
+const valueToText = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (Array.isArray(value)) {
+    return value.map(valueToText).filter(Boolean).join(', ');
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+  if (typeof value === 'number') {
+    return String(value);
+  }
+  if (typeof value === 'string') {
+    // Timestamps read better as a day; the panel has no room for seconds and a zone.
+    return ISO_DATE_TIME.exec(value)?.[1] ?? value;
+  }
+  if (typeof value === 'object') {
+    // Expanded references: users carry display_name, labels and modules a name, and
+    // estimate points a value. Anything else has nothing readable to show.
+    const o = value as Record<string, unknown>;
+    for (const k of ['display_name', 'name', 'value']) {
+      if (typeof o[k] === 'string' || typeof o[k] === 'number') {
+        return String(o[k]);
+      }
+    }
+  }
+  return '';
+};
+
+/** Keeps user text from turning into markdown structure (bold, links, lists). */
+const escapeMarkdown = (text: string): string =>
+  text.replace(/([\\`*_[\]#<>|])/g, '\\$1');
+
+/**
+ * The picked fields as markdown lines (`**Label:** value`), in the order picked. Empty
+ * values are left out, so the row hides when nothing has a value.
+ */
+export const formatExtraFields = (
+  item: Record<string, unknown>,
+  fields: string[],
+  releaseNames: string[],
+): string =>
+  fields
+    .map((f) => {
+      const text = f === RELEASES_OPTION ? releaseNames.join(', ') : valueToText(item[f]);
+      return text ? `**${escapeMarkdown(fieldLabel(f))}:** ${escapeMarkdown(text)}` : '';
+    })
+    .filter(Boolean)
+    .join('  \n');
+
+/** Names of the releases that list this work item. */
+export const releaseNamesFor = (releases: PlaneRelease[], workItemId: string): string[] =>
+  releases
+    .filter((r) => r.name && (r.work_items || []).includes(workItemId))
+    .map((r) => r.name as string);
